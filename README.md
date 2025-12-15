@@ -30,6 +30,17 @@ python authscope.py \
   --password alice123 \
   --unsigned \
   --auto-exploit
+
+# or
+
+python authscope.py \
+  --url http://localhost:3000/admin/data \
+  --auth-login http://localhost:3000/auth/login \
+  --username alice \
+  --password alice123 \
+  --unsigned \
+  --auto-exploit \
+  --export output.csv
 ```
 ![Demo](demo.gif)
 
