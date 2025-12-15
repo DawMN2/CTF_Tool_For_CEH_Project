@@ -23,9 +23,15 @@ pip install -r requirements.txt
 
 ## Usage
 ```
-python authscope.py -u https://example.com
-python authscope.py -u https://example.com --export nuclei.csv
+python authscope.py \
+  --url http://localhost:3000/admin/data \
+  --auth-login http://localhost:3000/auth/login \
+  --username alice \
+  --password alice123 \
+  --unsigned \
+  --auto-exploit
 ```
+![Demo](demo.gif)
 
 ## Legal & Ethical Notice
 Use only in:
